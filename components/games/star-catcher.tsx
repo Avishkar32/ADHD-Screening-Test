@@ -3,542 +3,265 @@
 import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
-import type { Star, Asteroid, Spaceship, GameMetrics } from "@/lib/types"
-import { getRandomInt } from "@/lib/utils"
+import type { GameMetrics } from "@/lib/types"
 
 interface StarCatcherProps {
   age: number
   onComplete: (metrics: GameMetrics) => void
 }
 
+interface Alien {
+  box: number // 0-8
+  appearedAt: number
+  visible: boolean
+  hit: boolean
+}
+
+interface AlienGhost {
+  id: number;
+  x: number;
+  y: number;
+  opacity: number;
+}
+
+interface Distractor {
+  box: number
+  appearedAt: number
+  visible: boolean
+}
+
+interface TargetHit {
+  targetAppearTime: number;
+  hitTime: number;
+  isCorrect: boolean;
+}
+
+const GRID_SIZE = 3
+const BOX_COUNT = GRID_SIZE * GRID_SIZE
+
 export default function StarCatcher({ age, onComplete }: StarCatcherProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
   const [gameState, setGameState] = useState<"intro" | "playing" | "complete">("intro")
-  const [stars, setStars] = useState<Star[]>([])
-  const [asteroids, setAsteroids] = useState<Asteroid[]>([])
-  const [spaceship, setSpaceship] = useState<Spaceship>({ x: 0, y: 0, rotation: 0, thrusterActive: false })
-  const [currentStarIndex, setCurrentStarIndex] = useState(0)
+  const [alien, setAlien] = useState<Alien | null>(null)
+  const [score, setScore] = useState(0)
   const [startTime, setStartTime] = useState(0)
   const [errors, setErrors] = useState(0)
   const [distractionEvents, setDistractionEvents] = useState(0)
   const [reactionTimes, setReactionTimes] = useState<number[]>([])
-  const [lastStarTime, setLastStarTime] = useState(0)
-  const [canvasInitialized, setCanvasInitialized] = useState(false)
+  const [round, setRound] = useState(0)
+  const [totalRounds, setTotalRounds] = useState(30)
+  const [ghosts, setGhosts] = useState<AlienGhost[]>([])
+  const [alienAppearTs, setAlienAppearTs] = useState<number>(0);
+  const [isGridHovered, setIsGridHovered] = useState(false);
+  const [distractors, setDistractors] = useState<Distractor[]>([])
+  const [distractorClicks, setDistractorClicks] = useState(0)
+  const [targetHits, setTargetHits] = useState<TargetHit[]>([])
+  const [wrongTargetClicks, setWrongTargetClicks] = useState(0)
 
-  // Game configuration based on age
+  // Game config based on age
   const getGameConfig = () => {
     if (age >= 4 && age <= 6) {
-      return {
-        starCount: 3,
-        asteroidCount: 2,
-        asteroidSpeed: 0.8,
-        starSize: 60,
-        clickableAreaSize: 70,
+      return { 
+        alienVisibleTime: 1600, 
+        totalRounds: 20, 
+        popAnimDuration: 400,
+        distractorChance: 0.3, // 30% chance of distractor
+        maxDistractors: 1
       }
     } else if (age >= 7 && age <= 12) {
-      return {
-        starCount: 4,
-        asteroidCount: 3,
-        asteroidSpeed: 1.2,
-        starSize: 50,
-        clickableAreaSize: 60,
+      return { 
+        alienVisibleTime: 1300, 
+        totalRounds: 30, 
+        popAnimDuration: 350,
+        distractorChance: 0.4,
+        maxDistractors: 2
       }
     } else {
-      return {
-        starCount: 5,
-        asteroidCount: 4,
-        asteroidSpeed: 1.5,
-        starSize: 40,
-        clickableAreaSize: 50,
+      return { 
+        alienVisibleTime: 1100, 
+        totalRounds: 40, 
+        popAnimDuration: 300,
+        distractorChance: 0.5,
+        maxDistractors: 2
       }
     }
   }
-
   const config = getGameConfig()
 
-  // Set up canvas dimensions on mount - IMPORTANT: This must happen before game initialization
-  useEffect(() => {
-    const setupCanvas = () => {
-      const canvas = canvasRef.current
-      if (!canvas) {
-        console.log("Canvas element not found on mount")
-        return
-      }
-
-      const container = canvas.parentElement
-      if (!container) {
-        console.log("Canvas parent element not found")
-        // Set default size if container not found
-        canvas.width = 800
-        canvas.height = 600
-      } else {
-        // Get dimensions from container
-        canvas.width = Math.max(container.clientWidth, 800)
-        canvas.height = Math.max(container.clientHeight, 600)
-      }
-      
-      console.log(`Canvas initialized with size: ${canvas.width}x${canvas.height}`)
-      setCanvasInitialized(true)
-    }
-
-    setupCanvas()
-    window.addEventListener("resize", setupCanvas)
-
-    return () => {
-      window.removeEventListener("resize", setupCanvas)
-    }
-  }, []) // Empty dependency array means this runs once on mount
-
-  // Initialize game
+  // Start game
   const initializeGame = () => {
-    console.log("Initializing game...")
-    
-    // Important: Ensure canvas is properly referenced before proceeding
-    const canvas = canvasRef.current
-    if (!canvas) {
-      console.error("Canvas reference is not available")
-      // Add a small delay and try again - this helps when React hasn't fully rendered the canvas
-      setTimeout(() => {
-        console.log("Retrying initialization...")
-        if (canvasRef.current) {
-          initializeGame()
-        }
-      }, 100)
-      return
-    }
-
-    const ctx = canvas.getContext("2d")
-    if (!ctx) {
-      console.error("Could not get 2D context from canvas")
-      return
-    }
-
-    // Ensure canvas has dimensions
-    if (canvas.width === 0 || canvas.height === 0) {
-      const container = canvas.parentElement
-      canvas.width = container ? container.clientWidth : 800
-      canvas.height = container ? container.clientHeight : 600
-      console.log(`Reset canvas dimensions to ${canvas.width}x${canvas.height}`)
-    }
-
-    const width = canvas.width
-    const height = canvas.height
-
-    // Create stars in random positions
-    const starColors = ["#FF5E5E", "#5E9DFF", "#5EFF8F", "#FFDD5E", "#C45EFF"]
-    const newStars: Star[] = []
-
-    for (let i = 0; i < config.starCount; i++) {
-      // Ensure stars are not too close to each other
-      let x: number, y: number, tooClose
-      let attempts = 0
-      do {
-        x = getRandomInt(config.starSize * 2, width - config.starSize * 2)
-        y = getRandomInt(config.starSize * 2, height - config.starSize * 2)
-        tooClose = newStars.some((star) => {
-          const dx = x - star.x
-          const dy = y - star.y
-          return Math.sqrt(dx * dx + dy * dy) < config.starSize * 4
-        })
-        attempts++
-        if (attempts > 100) {
-          // Avoid infinite loop if canvas is too small
-          tooClose = false
-        }
-      } while (tooClose)
-
-      newStars.push({
-        id: i,
-        x,
-        y,
-        color: starColors[i % starColors.length],
-        size: config.starSize,
-        collected: false,
-        order: i,
-      })
-    }
-
-    console.log(`Created ${newStars.length} stars`)
-    setStars(newStars)
-
-    // Create asteroids
-    const newAsteroids: Asteroid[] = []
-    for (let i = 0; i < config.asteroidCount; i++) {
-      newAsteroids.push({
-        id: i,
-        x: getRandomInt(0, width),
-        y: getRandomInt(0, height),
-        size: getRandomInt(15, 25),
-        speed: Math.random() * config.asteroidSpeed + 0.5,
-        rotation: Math.random() * Math.PI * 2,
-        rotationSpeed: (Math.random() - 0.5) * 0.05,
-      })
-    }
-
-    console.log(`Created ${newAsteroids.length} asteroids`)
-    setAsteroids(newAsteroids)
-
-    // Initialize spaceship in the center
-    setSpaceship({
-      x: width / 2,
-      y: height / 2,
-      rotation: 0,
-      thrusterActive: false,
-    })
-
-    console.log("Setting game state to playing")
-    setCurrentStarIndex(0)
+    setScore(0)
     setStartTime(Date.now())
-    setLastStarTime(Date.now())
     setErrors(0)
     setDistractionEvents(0)
     setReactionTimes([])
-    
-    // Important: make sure this is called after all state changes
+    setRound(0)
+    setTotalRounds(config.totalRounds)
+    setAlien(null)
     setGameState("playing")
   }
 
-  // Handle canvas click
-  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (gameState !== "playing") return
-
-    const canvas = canvasRef.current
-    if (!canvas) return
-
-    const rect = canvas.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const y = e.clientY - rect.top
-
-    // Check if clicked on the current star
-    const currentStar = stars.find((star) => star.order === currentStarIndex)
-    if (!currentStar) return
-
-    const dx = x - currentStar.x
-    const dy = y - currentStar.y
-    const distance = Math.sqrt(dx * dx + dy * dy)
-
-    if (distance <= config.clickableAreaSize) {
-      // Correct star clicked
-      const now = Date.now()
-      const reactionTime = now - lastStarTime
-      setReactionTimes((prev) => [...prev, reactionTime])
-      setLastStarTime(now)
-
-      // Update star to collected
-      setStars((prev) => 
-        prev.map((star) => 
-          star.id === currentStar.id ? { ...star, collected: true } : star
-        )
-      )
-
-      // Move to next star
-      const nextIndex = currentStarIndex + 1
-      setCurrentStarIndex(nextIndex)
-
-      // Move spaceship to the clicked star
-      setSpaceship((prev) => ({
-        ...prev,
-        x: currentStar.x,
-        y: currentStar.y,
-        thrusterActive: true,
-      }))
-
-      // If all stars collected, end game
-      if (nextIndex >= stars.length) {
-        setTimeout(() => {
-          setGameState("complete")
-        }, 1000)
-      }
-    } else {
-      // Wrong star or missed
-      setErrors((prev) => prev + 1)
-
-      // Check if clicked on a different star (wrong order)
-      const clickedStar = stars.find((star) => {
-        if (star.collected) return false
-        const dx = x - star.x
-        const dy = y - star.y
-        return Math.sqrt(dx * dx + dy * dy) <= config.clickableAreaSize
-      })
-
-      if (clickedStar && clickedStar.order !== currentStarIndex) {
-        setErrors((prev) => prev + 1) // Additional error for clicking wrong star
-      }
-    }
-  }
-
-  // Animation loop
+  // Alien pop-up logic
   useEffect(() => {
     if (gameState !== "playing") return
+    if (round >= totalRounds) {
+      setTimeout(() => setGameState("complete"), 500)
+      return
+    }
+    // Show alien in a random box
+    const availableBoxes = Array.from({ length: BOX_COUNT }, (_, i) => i)
+    const box = availableBoxes.splice(Math.floor(Math.random() * availableBoxes.length), 1)[0]
+    const appearedAt = Date.now()
+    setAlien({ box, appearedAt, visible: true, hit: false })
+    setAlienAppearTs(appearedAt)
 
-    const canvas = canvasRef.current
-    if (!canvas) return
-
-    const ctx = canvas.getContext("2d")
-    if (!ctx) return
-
-    const width = canvas.width
-    const height = canvas.height
-
-    let animationFrameId: number
-
-    const render = () => {
-      ctx.clearRect(0, 0, width, height)
-
-      // Draw stars
-      stars.forEach((star) => {
-        if (star.collected) return
-
-        // Draw star glow
-        const gradient = ctx.createRadialGradient(star.x, star.y, star.size * 0.2, star.x, star.y, star.size * 1.5)
-        gradient.addColorStop(0, star.color)
-        gradient.addColorStop(1, "transparent")
-
-        ctx.fillStyle = gradient
-        ctx.beginPath()
-        ctx.arc(star.x, star.y, star.size * 1.5, 0, Math.PI * 2)
-        ctx.fill()
-
-        // Draw twinkling effect
-        const twinkle = Math.sin(Date.now() / 200) * 0.2 + 0.8
-
-        // Draw star
-        ctx.fillStyle = star.color
-        ctx.beginPath()
-        drawStar(ctx, star.x, star.y, 5, star.size * 0.5 * twinkle, star.size * 0.25 * twinkle)
-        ctx.fill()
-
-        // Highlight current star
-        if (star.order === currentStarIndex) {
-          ctx.strokeStyle = "white"
-          ctx.lineWidth = 3
-          ctx.beginPath()
-          ctx.arc(star.x, star.y, star.size * 0.7, 0, Math.PI * 2)
-          ctx.stroke()
-
-          // Draw order number
-          ctx.fillStyle = "white"
-          ctx.font = `${star.size * 0.6}px Arial`
-          ctx.textAlign = "center"
-          ctx.textBaseline = "middle"
-          ctx.fillText(`${star.order + 1}`, star.x, star.y)
-        }
-      })
-
-      // Draw asteroids
-      asteroids.forEach((asteroid) => {
-        // Update asteroid position
-        asteroid.x += Math.cos(asteroid.rotation) * asteroid.speed
-        asteroid.y += Math.sin(asteroid.rotation) * asteroid.speed
-        asteroid.rotation += asteroid.rotationSpeed
-
-        // Wrap around screen
-        if (asteroid.x < -asteroid.size) asteroid.x = width + asteroid.size
-        if (asteroid.x > width + asteroid.size) asteroid.x = -asteroid.size
-        if (asteroid.y < -asteroid.size) asteroid.y = height + asteroid.size
-        if (asteroid.y > height + asteroid.size) asteroid.y = -asteroid.size
-
-        // Draw asteroid
-        ctx.save()
-        ctx.translate(asteroid.x, asteroid.y)
-        ctx.rotate(asteroid.rotation)
-
-        // Asteroid body
-        const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, asteroid.size)
-        gradient.addColorStop(0, "#AAA")
-        gradient.addColorStop(1, "#666")
-
-        ctx.fillStyle = gradient
-        ctx.beginPath()
-        ctx.arc(0, 0, asteroid.size, 0, Math.PI * 2)
-        ctx.fill()
-
-        // Asteroid craters
-        ctx.fillStyle = "#555"
-        for (let i = 0; i < 3; i++) {
-          const craterX = (Math.random() - 0.5) * asteroid.size * 0.8
-          const craterY = (Math.random() - 0.5) * asteroid.size * 0.8
-          const craterSize = asteroid.size * 0.2 * Math.random()
-          ctx.beginPath()
-          ctx.arc(craterX, craterY, craterSize, 0, Math.PI * 2)
-          ctx.fill()
-        }
-
-        ctx.restore()
-      })
-
-      // Draw spaceship
-      ctx.save()
-      ctx.translate(spaceship.x, spaceship.y)
-
-      // Calculate rotation towards current star
-      const currentStar = stars.find((star) => star.order === currentStarIndex)
-      if (currentStar && !currentStar.collected) {
-        const dx = currentStar.x - spaceship.x
-        const dy = currentStar.y - spaceship.y
-        const targetRotation = Math.atan2(dy, dx)
-
-        // Smoothly rotate towards target
-        let rotDiff = targetRotation - spaceship.rotation
-        if (rotDiff > Math.PI) rotDiff -= Math.PI * 2
-        if (rotDiff < -Math.PI) rotDiff += Math.PI * 2
-
-        spaceship.rotation += rotDiff * 0.1
-      }
-
-      ctx.rotate(spaceship.rotation)
-
-      // Draw spaceship body
-      ctx.fillStyle = "#FFFFFF"
-      ctx.beginPath()
-      ctx.moveTo(20, 0)
-      ctx.lineTo(-10, 10)
-      ctx.lineTo(-5, 0)
-      ctx.lineTo(-10, -10)
-      ctx.closePath()
-      ctx.fill()
-
-      // Draw cockpit
-      ctx.fillStyle = "#7AA8FF"
-      ctx.beginPath()
-      ctx.arc(5, 0, 7, 0, Math.PI * 2)
-      ctx.fill()
-
-      // Draw thruster flame if active
-      if (spaceship.thrusterActive) {
-        const flameSize = 0.7 + Math.random() * 0.3
-        const flameGradient = ctx.createLinearGradient(-5, 0, -25 * flameSize, 0)
-        flameGradient.addColorStop(0, "#FF9D7A")
-        flameGradient.addColorStop(0.7, "#FF5E5E")
-        flameGradient.addColorStop(1, "transparent")
-
-        ctx.fillStyle = flameGradient
-        ctx.beginPath()
-        ctx.moveTo(-5, 0)
-        ctx.lineTo(-15 * flameSize, 5 * flameSize)
-        ctx.lineTo(-25 * flameSize, 0)
-        ctx.lineTo(-15 * flameSize, -5 * flameSize)
-        ctx.closePath()
-        ctx.fill()
-
-        // Gradually turn off thruster
-        if (Math.random() > 0.95) {
-          setSpaceship((prev) => ({ ...prev, thrusterActive: false }))
+    // Maybe add distractors
+    if (Math.random() < config.distractorChance) {
+      const distractorCount = Math.floor(Math.random() * config.maxDistractors) + 1
+      const newDistractors: Distractor[] = []
+      
+      for (let i = 0; i < distractorCount; i++) {
+        if (availableBoxes.length > 0) {
+          const dBox = availableBoxes.splice(Math.floor(Math.random() * availableBoxes.length), 1)[0]
+          newDistractors.push({ box: dBox, appearedAt, visible: true })
         }
       }
+      setDistractors(newDistractors)
+    } else {
+      setDistractors([])
+    }
 
-      ctx.restore()
-
-      // Draw order indicators at the bottom
-      const indicatorSize = 40
-      const totalWidth = stars.length * (indicatorSize + 10)
-      const startX = (width - totalWidth) / 2
-
-      stars.forEach((star, index) => {
-        const x = startX + index * (indicatorSize + 10)
-        const y = height - indicatorSize - 20
-
-        ctx.fillStyle = star.color
-        ctx.beginPath()
-        ctx.arc(x + indicatorSize / 2, y + indicatorSize / 2, indicatorSize / 2, 0, Math.PI * 2)
-        ctx.fill()
-
-        ctx.fillStyle = "white"
-        ctx.font = "24px Arial"
-        ctx.textAlign = "center"
-        ctx.textBaseline = "middle"
-        ctx.fillText(`${index + 1}`, x + indicatorSize / 2, y + indicatorSize / 2)
-
-        if (star.collected) {
-          ctx.strokeStyle = "#5EFF8F"
-          ctx.lineWidth = 3
-          ctx.beginPath()
-          ctx.arc(x + indicatorSize / 2, y + indicatorSize / 2, indicatorSize / 2 + 5, 0, Math.PI * 2)
-          ctx.stroke()
-        } else if (index === currentStarIndex) {
-          ctx.strokeStyle = "white"
-          ctx.lineWidth = 3
-          ctx.beginPath()
-          ctx.arc(x + indicatorSize / 2, y + indicatorSize / 2, indicatorSize / 2 + 5, 0, Math.PI * 2)
-          ctx.stroke()
+    // Hide alien and distractors after visible time
+    const timeout = setTimeout(() => {
+      setAlien((prev) => {
+        if (prev && prev.visible && !prev.hit) {
+          setErrors(e => e + 1)
+          setDistractionEvents(d => d + 1)
         }
+        return null
       })
+      setDistractors([])
+      setRound(r => r + 1)
+    }, config.alienVisibleTime)
 
-      // Draw instructions
-      ctx.fillStyle = "rgba(255, 255, 255, 0.9)"
-      ctx.font = "24px Arial"
-      ctx.textAlign = "center"
-      ctx.fillText("Click on the stars in order: 1, 2, 3...", width / 2, 40)
+    return () => clearTimeout(timeout)
+  }, [gameState, round, totalRounds, config.alienVisibleTime])
 
-      animationFrameId = requestAnimationFrame(render)
+  // Add ghost animation frame
+  useEffect(() => {
+    if (ghosts.length === 0) return;
+
+    const animateGhosts = () => {
+      setGhosts(prev => prev
+        .map(ghost => ({
+          ...ghost,
+          y: ghost.y - 2,
+          opacity: ghost.opacity - 0.02
+        }))
+        .filter(ghost => ghost.opacity > 0)
+      );
+    };
+
+    const interval = setInterval(animateGhosts, 16);
+    return () => clearInterval(interval);
+  }, [ghosts]);
+
+  // Handle box click
+  const handleBoxClick = (idx: number) => {
+    if (gameState !== "playing") return
+    const clickTime = Date.now()
+
+    // Check if clicked on distractor
+    if (distractors.some(d => d.visible && d.box === idx)) {
+      setErrors(e => e + 1)
+      setDistractorClicks(c => c + 1)
+      setTargetHits(prev => [...prev, {
+        targetAppearTime: alien?.appearedAt || clickTime,
+        hitTime: clickTime,
+        isCorrect: false
+      }])
+      return
     }
 
-    render()
-
-    return () => {
-      cancelAnimationFrame(animationFrameId)
+    if (alien && alien.visible && idx === alien.box && !alien.hit) {
+      setScore(s => s + 1)
+      setTargetHits(prev => [...prev, {
+        targetAppearTime: alien.appearedAt,
+        hitTime: clickTime,
+        isCorrect: true
+      }])
+      
+      // Create ghost effect
+      const boxElement = document.querySelector(`[data-box="${idx}"]`);
+      if (boxElement) {
+        const rect = boxElement.getBoundingClientRect();
+        setGhosts(prev => [...prev, {
+          id: Date.now(),
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+          opacity: 1
+        }]);
+      }
+      
+      setAlien(a => a ? { ...a, hit: true, visible: false } : a)
+      setRound(r => r + 1)
+    } else {
+      setErrors(e => e + 1)
+      setWrongTargetClicks(w => w + 1)
+      setTargetHits(prev => [...prev, {
+        targetAppearTime: alien?.appearedAt || clickTime,
+        hitTime: clickTime,
+        isCorrect: false
+      }])
     }
-  }, [gameState, stars, asteroids, spaceship, currentStarIndex, config.clickableAreaSize])
-
-  // Helper function to draw a star shape
-  const drawStar = (
-    ctx: CanvasRenderingContext2D,
-    cx: number,
-    cy: number,
-    spikes: number,
-    outerRadius: number,
-    innerRadius: number,
-  ) => {
-    let rot = (Math.PI / 2) * 3
-    const step = Math.PI / spikes
-
-    ctx.beginPath()
-    ctx.moveTo(cx, cy - outerRadius)
-
-    for (let i = 0; i < spikes; i++) {
-      ctx.lineTo(cx + Math.cos(rot) * outerRadius, cy + Math.sin(rot) * outerRadius)
-      rot += step
-      ctx.lineTo(cx + Math.cos(rot) * innerRadius, cy + Math.sin(rot) * innerRadius)
-      rot += step
-    }
-
-    ctx.lineTo(cx, cy - outerRadius)
-    ctx.closePath()
   }
 
-  // Calculate metrics for the game
+  // Metrics calculation (same as before, but errorRate is per round)
   const calculateMetrics = () => {
     const endTime = Date.now()
     const playTimeMs = endTime - startTime
     const playTimeMin = playTimeMs / 60000
 
-    // Calculate reaction time variability
+    // Get only correct hits
+    const correctHits = targetHits.filter(hit => hit.isCorrect)
+    
+    // Calculate reaction times for correct hits
+    const reactionTimes = correctHits.map(hit => hit.hitTime - hit.targetAppearTime)
+    
+    // Calculate mean reaction time
+    const avgReactionTime = reactionTimes.length > 0
+      ? reactionTimes.reduce((a, b) => a + b, 0) / reactionTimes.length
+      : 0
+
+    // Calculate reaction time variability (standard deviation)
     let rtVariability = 0
     if (reactionTimes.length > 0) {
-      const avgReactionTime = reactionTimes.reduce((a, b) => a + b, 0) / reactionTimes.length
-      const rtVariance = reactionTimes.reduce((a, b) => a + Math.pow(b - avgReactionTime, 2), 0) / reactionTimes.length
-      rtVariability = Math.sqrt(rtVariance)
+      const squaredDiffs = reactionTimes.map(rt => Math.pow(rt - avgReactionTime, 2))
+      const variance = squaredDiffs.reduce((a, b) => a + b, 0) / reactionTimes.length
+      rtVariability = Math.sqrt(variance)
     }
 
-    // Error rate as percentage
-    const errorRate = (errors / stars.length) * 100
+    // Error rate: wrong target clicks / total rounds
+    const errorRate = (wrongTargetClicks / totalRounds) * 100
 
-    // Distraction events per minute
-    const distractionEventsPerMin = distractionEvents / playTimeMin
+    // Distraction events: clicks on distractors per minute
+    const distractionEventsPerMin = distractorClicks / playTimeMin
+
+    // Total completion time in seconds
+    const completionTime = playTimeMs / 1000
 
     return {
       age,
       adhd_status: Math.random() > 0.8 ? 1 : 0,
       playtime_min: playTimeMin,
       session_incomplete: 0,
-      sc_er: errorRate,
-      sc_de: distractionEventsPerMin,
-      sc_tct: playTimeMs / 1000,
-      sc_rtv: rtVariability,
-      movementVariance: undefined, // Set to undefined as expected by GameMetrics type
-      score: undefined, // Set to undefined as expected by GameMetrics type
-      sustainedFailures: 0, // Add appropriate calculation if needed
-      impulseErrors: 0, // Add appropriate calculation if needed
+      sc_er: errorRate,                    // Error rate: wrong target clicks
+      sc_de: distractionEventsPerMin,      // Distraction events per minute
+      sc_tct: completionTime,              // Total completion time
+      sc_rtv: rtVariability,               // Reaction time variability
+      movementVariance: undefined,
+      score: score,
+      sustainedFailures: distractorClicks, // Total distractor clicks
+      impulseErrors: distractorClicks,     // Same as sustainedFailures for this game
     }
   }
 
@@ -546,26 +269,13 @@ export default function StarCatcher({ age, onComplete }: StarCatcherProps) {
     <div className="w-full max-w-4xl">
       {gameState === "intro" && (
         <Card className="bg-black/50 backdrop-blur-md border-purple-500/30 p-6 text-center">
-          <h2 className="text-2xl font-bold text-white mb-4">Star Catcher</h2>
+          <h2 className="text-2xl font-bold text-white mb-4">Space Whack-a-Alien</h2>
           <p className="text-gray-300 mb-6 text-lg">
-            Guide your spaceship to collect stars in the correct sequence.
-            <br />
-            Click on the stars in numerical order (1, 2, 3...).
+            Click the alien 👽 as soon as it appears!<br />
+            Try to hit as many as you can.
           </p>
-          <Button 
-            onClick={() => {
-              console.log("Start Game button clicked");
-              
-              // Ensure canvas is initialized before starting the game
-              if (canvasRef.current) {
-                initializeGame();
-              } else {
-                console.log("Canvas not ready, waiting to initialize");
-                // Force canvas creation then initialize
-                setCanvasInitialized(true);
-                setTimeout(initializeGame, 100);
-              }
-            }} 
+          <Button
+            onClick={initializeGame}
             className="bg-purple-600 hover:bg-purple-700 text-white text-lg py-6 px-8"
           >
             Start Game
@@ -574,22 +284,154 @@ export default function StarCatcher({ age, onComplete }: StarCatcherProps) {
       )}
 
       {gameState === "playing" && (
-        <div className="relative w-full h-[600px] rounded-lg overflow-hidden border border-purple-500/30">
-          <canvas 
-            ref={canvasRef} 
-            onClick={handleCanvasClick} 
-            className="w-full h-full bg-black/70" 
-            width="800" 
-            height="600"
-            style={{ display: "block" }} // Force block display
-          />
+        <div className="flex flex-col items-center">
+          <div className="mb-4 text-white text-lg">
+            Score: {score} &nbsp;|&nbsp; Round: {round + 1}/{totalRounds}
+          </div>
+          <div
+            className="relative"
+            style={{
+              width: 500,
+              height: 540, // increased for bottom padding
+              margin: "0 auto"
+            }}
+          >
+            <div
+              className="grid grid-cols-3 gap-4 bg-black/70 rounded-lg p-6 border border-purple-500/30"
+              style={{
+                width: 480,
+                height: 500,
+                cursor: isGridHovered
+                  ? `url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'><text y='48' font-size='56'>🔨</text></svg>") 32 32, pointer`
+                  : "auto",
+                paddingBottom: 100 // extra padding at the bottom
+              }}
+              onMouseEnter={() => setIsGridHovered(true)}
+              onMouseLeave={() => setIsGridHovered(false)}
+            >
+              {[...Array(BOX_COUNT)].map((_, idx) => {
+                let content = null;
+                
+                // Show alien if present
+                if (alien && alien.visible && alien.box === idx && !alien.hit) {
+                  // Alien rise animation
+                  const elapsed = Math.min(Date.now() - alienAppearTs, config.popAnimDuration);
+                  const rise = 20 - (elapsed / config.popAnimDuration) * 20; // from 20px down to 0
+                  content = (
+                    <span
+                      style={{
+                        display: "inline-block",
+                        transform: `translateY(${rise}px)`,
+                        transition: "transform 0.18s",
+                        willChange: "transform"
+                      }}
+                    >
+                      👽
+                    </span>
+                  );
+                }
+                
+                // Show distractor if present
+                const distractor = distractors.find(d => d.visible && d.box === idx);
+                if (distractor) {
+                  content = <span className="animate-bounce">🧑‍🚀</span>;
+                }
+
+                return (
+                  <div
+                    key={idx}
+                    data-box={idx}
+                    onClick={() => handleBoxClick(idx)}
+                    className="flex items-center justify-center rounded-md"
+                    style={{
+                      width: 140,
+                      height: 140,
+                      border: alien && alien.visible && alien.box === idx && !alien.hit
+                        ? "3px solid #50FF50"
+                        : "2px solid #444",
+                      fontSize: 64,
+                      userSelect: "none",
+                      transition: "all 0.2s",
+                      position: "relative",
+                      overflow: "hidden",
+                      cursor: isGridHovered
+                        ? `url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'><text y='48' font-size='56'>🔨</text></svg>") 32 32, pointer`
+                        : "auto",
+                      background: `
+                        linear-gradient(
+                          135deg, 
+                          rgba(40, 40, 40, 0.95) 0%,
+                          rgba(20, 20, 20, 0.95) 100%
+                        )
+                      `,
+                      boxShadow: `
+                        inset 0 0 15px rgba(0, 0, 0, 0.5),
+                        0 2px 4px rgba(0, 0, 0, 0.4)
+                      `,
+                      // Add metallic texture
+                      backgroundImage: `
+                        linear-gradient(
+                          45deg,
+                          rgba(255,255,255,0.05) 25%,
+                          transparent 25%,
+                          transparent 75%,
+                          rgba(255,255,255,0.05) 75%
+                        ),
+                        linear-gradient(
+                          45deg,
+                          rgba(255,255,255,0.05) 25%,
+                          transparent 25%,
+                          transparent 75%,
+                          rgba(255,255,255,0.05) 75%
+                        )
+                      `,
+                      backgroundSize: "30px 30px",
+                      backgroundPosition: "0 0, 15px 15px"
+                    }}
+                  >
+                    {content}
+                  </div>
+                );
+              })}
+            </div>
+            {/* Ghost animations */}
+            {ghosts.map(ghost => (
+              <div
+                key={ghost.id}
+                className="pointer-events-none"
+                style={{
+                  position: "fixed",
+                  left: ghost.x,
+                  top: ghost.y,
+                  opacity: ghost.opacity,
+                  transform: 'translate(-50%, -50%)',
+                  fontSize: '64px',
+                  transition: 'all 0.016s linear',
+                  zIndex: 50,
+                  pointerEvents: "none"
+                }}
+              >
+                <span
+                  style={{
+                    display: "inline-block",
+                    transform: `translateY(-40px)`,
+                    transition: "transform 0.5s"
+                  }}
+                >
+                  👾
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
       {gameState === "complete" && (
         <Card className="bg-black/50 backdrop-blur-md border-purple-500/30 p-6 text-center">
           <h2 className="text-2xl font-bold text-white mb-4">Game Complete!</h2>
-          <p className="text-gray-300 mb-6 text-lg">You've collected all the stars!</p>
+          <p className="text-gray-300 mb-6 text-lg">
+            You whacked {score} aliens!
+          </p>
           <Button
             onClick={() => onComplete(calculateMetrics())}
             className="bg-purple-600 hover:bg-purple-700 text-white text-lg py-6 px-8"
@@ -597,13 +439,6 @@ export default function StarCatcher({ age, onComplete }: StarCatcherProps) {
             Continue
           </Button>
         </Card>
-      )}
-
-      {/* This hidden canvas ensures the ref is available during game initialization */}
-      {gameState === "intro" && (
-        <div style={{ display: "none" }}>
-          <canvas ref={canvasRef} width="800" height="600" />
-        </div>
       )}
     </div>
   )
